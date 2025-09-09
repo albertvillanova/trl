@@ -35,7 +35,20 @@ if is_vision_available():
     from transformers import AutoModelForVision2Seq, AutoProcessor
 
 
+class TestTrl:
+    def setup_method(self):
+        import tempfile
+
+        self.tmp_dir = tempfile.mkdtemp()
+
+    def teardown_method(self):
+        import shutil
+
+        shutil.rmtree(self.tmp_dir)
+
+
 class TestOnlineDPOTrainer(TrlTestCase):
+    # class TestOnlineDPOTrainer(TestTrl):
     def setUp(self):
         super().setUp()
         self.model_id = "trl-internal-testing/tiny-Qwen2ForCausalLM-2.5"
@@ -48,6 +61,19 @@ class TestOnlineDPOTrainer(TrlTestCase):
         self.reward_model = AutoModelForSequenceClassification.from_pretrained(self.reward_model_id, num_labels=1)
         self.reward_tokenizer = AutoTokenizer.from_pretrained(self.reward_model_id)
         self.reward_tokenizer.pad_token = self.reward_tokenizer.eos_token
+
+    # def setup_method(self):
+    #     super().setup_method()
+    #     self.model_id = "trl-internal-testing/tiny-Qwen2ForCausalLM-2.5"
+    #     self.model = AutoModelForCausalLM.from_pretrained(self.model_id)
+    #     self.ref_model = AutoModelForCausalLM.from_pretrained(self.model_id)
+    #     self.tokenizer = AutoTokenizer.from_pretrained(self.model_id)
+    #     self.tokenizer.pad_token = self.tokenizer.eos_token
+    #
+    #     self.reward_model_id = "trl-internal-testing/tiny-LlamaForCausalLM-3.2"
+    #     self.reward_model = AutoModelForSequenceClassification.from_pretrained(self.reward_model_id, num_labels=1)
+    #     self.reward_tokenizer = AutoTokenizer.from_pretrained(self.reward_model_id)
+    #     self.reward_tokenizer.pad_token = self.reward_tokenizer.eos_token
 
     @parameterized.expand([("standard_prompt_only",), ("conversational_prompt_only",)])
     def test_training(self, config_name):
@@ -419,6 +445,11 @@ class TestOnlineDPOTrainer(TrlTestCase):
         self.assertEqual(trainer.generation_config.max_new_tokens, 64)
         self.assertFalse(trainer.generation_config.do_sample)  # From generation_kwargs
 
+    # @pytest.mark.xfail(
+    #     Version(transformers.__version__) < Version("4.56.2"),
+    #     reason="Upstream bug in transformers (GH#40692). Fix merged; awaiting release >= 4.56.2",
+    #     strict=True,
+    # )
     @require_torch_accelerator
     @parameterized.expand([("standard_prompt_only",), ("conversational_prompt_only",)])
     def test_training_with_transformers_paged(self, config_name):
@@ -448,9 +479,22 @@ class TestOnlineDPOTrainer(TrlTestCase):
 
         # Check if training loss is available
         self.assertIn("train_loss", trainer.state.log_history[-1])
+        # Enforce strict xfail
+        if Version(transformers.__version__) < Version("4.56.2"):
+            self.fail("Test unexpectedly passed with transformers < 4.56.2")
 
+    # @pytest.mark.xfail(
+    #     Version(transformers.__version__) < Version("4.56.2"),
+    #     reason="Upstream bug in transformers (GH#40692). Fix merged; awaiting release >= 4.56.2",
+    #     strict=True,
+    # )
     @parameterized.expand([("standard_prompt_only",), ("conversational_prompt_only",)])
     def test_training_with_reward_funcs(self, config_name):
+        if Version(transformers.__version__) < Version("4.56.1"):
+            pytest.xfail("Upstream bug in transformers (GH#40692). Fix merged; awaiting release >= 4.56.2")
+        else:
+            self.fail("Test unexpectedly marked as xfail with transformers >= 4.56.2")
+
         def simple_reward_func(prompts, completions, completion_ids, **kwargs):
             return [0.5 for _ in prompts]
 
@@ -480,6 +524,8 @@ class TestOnlineDPOTrainer(TrlTestCase):
         self.assertIsNotNone(trainer.reward_weights)
         self.assertAlmostEqual(trainer.reward_weights[0].item(), 0.7, places=5)
         self.assertAlmostEqual(trainer.reward_weights[1].item(), 0.3, places=5)
+        if Version(transformers.__version__) < Version("4.56.1"):
+            self.fail("Test unexpectedly passed with transformers < 4.56.2")
 
 
 @require_vision
