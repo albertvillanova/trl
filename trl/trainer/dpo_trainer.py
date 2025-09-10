@@ -27,7 +27,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from accelerate import PartialState, logging
-from accelerate.utils import tqdm
 from datasets import Dataset, IterableDataset
 from torch import autocast
 from torch.utils.data import DataLoader
@@ -62,7 +61,6 @@ from .utils import (
     RunningMoments,
     cap_exp,
     disable_dropout_in_model,
-    empty_cache,
     flush_left,
     flush_right,
     generate_model_card,
@@ -798,37 +796,14 @@ class DPOTrainer(Trainer):
 
         if self.precompute_ref_log_probs and not self._precomputed_train_ref_log_probs:
             batch_size = self.args.precompute_ref_batch_size or self.args.per_device_train_batch_size
-            dataloader_params = {
-                "batch_size": batch_size,
-                "collate_fn": self.data_collator,
-                "num_workers": self.args.dataloader_num_workers,
-                "pin_memory": self.args.dataloader_pin_memory,
-                "shuffle": False,
-            }
 
-            # prepare dataloader
-            data_loader = self.accelerator.prepare(DataLoader(self.train_dataset, **dataloader_params))
-
-            ref_chosen_logps = []
-            ref_rejected_logps = []
-            for padded_batch in tqdm(iterable=data_loader, desc="Train dataset reference log probs"):
-                ref_chosen_logp, ref_rejected_logp = self.compute_ref_log_probs(padded_batch)
-                ref_chosen_logp, ref_rejected_logp = self.accelerator.gather_for_metrics(
-                    (ref_chosen_logp, ref_rejected_logp)
-                )
-                ref_chosen_logps.append(ref_chosen_logp.cpu())
-                ref_rejected_logps.append(ref_rejected_logp.cpu())
-
-                # Unnecessary cache clearing to avoid OOM
-                empty_cache()
-                self.accelerator.free_memory()
-
-            all_ref_chosen_logps = torch.cat(ref_chosen_logps).float().numpy()
-            all_ref_rejected_logps = torch.cat(ref_rejected_logps).float().numpy()
-
-            self.train_dataset = self.train_dataset.add_column(name="ref_chosen_logps", column=all_ref_chosen_logps)
-            self.train_dataset = self.train_dataset.add_column(
-                name="ref_rejected_logps", column=all_ref_rejected_logps
+            # Use dataset.map() to compute reference log probabilities with caching
+            self.train_dataset = self.train_dataset.map(
+                self._compute_ref_log_probs_batch_map,
+                batched=True,
+                batch_size=batch_size,
+                desc="Computing train dataset reference log probs",
+                load_from_cache_file=True,
             )
 
             self._precomputed_train_ref_log_probs = True
@@ -852,32 +827,15 @@ class DPOTrainer(Trainer):
 
         if self.precompute_ref_log_probs and not self._precomputed_eval_ref_log_probs:
             batch_size = self.args.precompute_ref_batch_size or self.args.per_device_eval_batch_size
-            dataloader_params = {
-                "batch_size": batch_size,
-                "collate_fn": self.data_collator,
-                "num_workers": self.args.dataloader_num_workers,
-                "pin_memory": self.args.dataloader_pin_memory,
-                "shuffle": False,
-            }
 
-            # prepare dataloader
-            data_loader = self.accelerator.prepare(DataLoader(eval_dataset, **dataloader_params))
-
-            ref_chosen_logps = []
-            ref_rejected_logps = []
-            for padded_batch in tqdm(iterable=data_loader, desc="Eval dataset reference log probs"):
-                ref_chosen_logp, ref_rejected_logp = self.compute_ref_log_probs(padded_batch)
-                ref_chosen_logp, ref_rejected_logp = self.accelerator.gather_for_metrics(
-                    (ref_chosen_logp, ref_rejected_logp)
-                )
-                ref_chosen_logps.append(ref_chosen_logp.cpu())
-                ref_rejected_logps.append(ref_rejected_logp.cpu())
-
-            all_ref_chosen_logps = torch.cat(ref_chosen_logps).float().numpy()
-            all_ref_rejected_logps = torch.cat(ref_rejected_logps).float().numpy()
-
-            eval_dataset = eval_dataset.add_column(name="ref_chosen_logps", column=all_ref_chosen_logps)
-            eval_dataset = eval_dataset.add_column(name="ref_rejected_logps", column=all_ref_rejected_logps)
+            # Use dataset.map() to compute reference log probabilities with caching
+            eval_dataset = eval_dataset.map(
+                self._compute_ref_log_probs_batch_map,
+                batched=True,
+                batch_size=batch_size,
+                desc="Computing eval dataset reference log probs",
+                load_from_cache_file=True,
+            )
 
             # Save calculated ref_chosen_logps and ref_rejected_logps to the eval_dataset for subsequent runs
             if self.eval_dataset is not None:
@@ -912,6 +870,28 @@ class DPOTrainer(Trainer):
             else:
                 ref_model_output = self.concatenated_forward(self.ref_model, batch, is_ref_model=True)
         return ref_model_output["chosen_logps"], ref_model_output["rejected_logps"]
+
+    def _compute_ref_log_probs_batch_map(self, examples: dict) -> dict:
+        """
+        Compute reference log probabilities for a batch of examples using dataset.map().
+        This method enables caching by the datasets library.
+        """
+        # Create a batch from the examples
+        batch = self.data_collator(examples)
+        batch = self._prepare_inputs(batch)
+
+        # Compute reference log probabilities
+        ref_chosen_logps, ref_rejected_logps = self.compute_ref_log_probs(batch)
+
+        # Convert to numpy for storage
+        ref_chosen_logps = ref_chosen_logps.cpu().float().numpy()
+        ref_rejected_logps = ref_rejected_logps.cpu().float().numpy()
+
+        # Return as dict to add columns to the dataset
+        return {
+            "ref_chosen_logps": ref_chosen_logps.tolist(),
+            "ref_rejected_logps": ref_rejected_logps.tolist(),
+        }
 
     @staticmethod
     def concatenated_inputs(
