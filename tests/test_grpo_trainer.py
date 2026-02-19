@@ -210,6 +210,28 @@ class TestGRPORolloutDispatch:
         with pytest.raises(ValueError, match="rollout_func must return keys"):
             trainer._generate_single_turn(["prompt"])
 
+    def test_generate_single_turn_rollout_func_no_extra_fields(self):
+        trainer = self._make_trainer()
+        trainer.rollout_func = MagicMock(
+            return_value={"prompt_ids": [[1]], "completion_ids": [[2]], "logprobs": [[0.0]]}
+        )
+
+        _, _, _, extra_fields = trainer._generate_single_turn(["prompt"])
+
+        assert extra_fields == {}
+
+    def test_generate_single_turn_rollout_func_does_not_sync_when_step_unchanged(self):
+        trainer = self._make_trainer()
+        trainer.use_vllm = True
+        trainer._last_loaded_step = trainer.state.global_step  # already in sync
+        trainer.rollout_func = MagicMock(
+            return_value={"prompt_ids": [[1]], "completion_ids": [[2]], "logprobs": [[0.0]]}
+        )
+
+        trainer._generate_single_turn(["prompt"])
+
+        trainer.vllm_generation.sync_weights.assert_not_called()
+
 
 class TestGRPOTrainer(TrlTestCase):
     def test_init_minimal(self):
