@@ -427,6 +427,15 @@ class GRPOTrainer(BaseTrainer):
                     "it with `pip install jmespath` to use this feature."
                 )
         self.tools = tools or []
+
+        if self.rollout_func is not None and self.tools:
+            raise ValueError(
+                "rollout_func and tools cannot be used together. The tool-call loop passes fully-assembled "
+                "conversation histories to _generate_single_turn, which is incompatible with custom rollout "
+                "dispatch that expects original prompts. If you need tool-augmented generation, handle the "
+                "full tool execution loop inside your rollout_func."
+            )
+
         self._sync_tool_dict = {}
         self._async_tool_dict = {}
         if self.tools:
