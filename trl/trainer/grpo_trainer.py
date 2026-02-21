@@ -225,9 +225,20 @@ class GRPOTrainer(BaseTrainer):
         rollout_func (`RolloutFunc`, *optional*):
             Function to use for generating completions. It receives the list of prompts allocated to the current
             process and the trainer instance. It must return a dict with `"prompt_ids"`, `"completion_ids"`, and
-            `"logprobs"` fields. Any other fields are forwarded to the reward functions. The function receives the
-            raw per-process prompt slice with no duplication; it is responsible for returning the correct number of
-            completions per prompt (see `num_generations` / `num_generations_eval` on the trainer). This feature is
+            `"logprobs"` fields. Any other fields are forwarded to the reward functions.
+
+            The `prompts` argument type depends on the dataset format:
+
+            - **Non-conversational** datasets: `prompts` is a `list[str]`.
+            - **Conversational** datasets: `prompts` is a `list[list[dict]]`, where each inner list is a sequence
+              of `{"role": ..., "content": ...}` messages. Content values may be strings or lists of typed content
+              blocks (e.g. `[{"type": "image", ...}, {"type": "text", ...}]` for multimodal inputs).
+
+            `rollout_func` is responsible for applying any required formatting (chat template, tokenization)
+            before calling its generation backend. Structured messages are passed through unmodified so that
+            multimodal content is not lost before rollout logic runs. The function receives the per-process
+            prompt slice with no duplication; it is responsible for returning the correct number of completions
+            per prompt (see `num_generations` / `num_generations_eval` on the trainer). This feature is
             experimental and may change or be removed at any time without prior notice.
     """
 
@@ -1167,6 +1178,9 @@ class GRPOTrainer(BaseTrainer):
                     self.vllm_generation.sync_weights()
                 self._last_loaded_step = self.state.global_step
 
+            # Pass prompts to rollout_func preserving structured messages.
+            # Chat templating must happen inside rollout_func, at the backend boundary, so that
+            # multimodal content (images, typed content blocks) is not lost before rollout logic runs.
             output = self.rollout_func(prompts, self)
             required_keys = {"prompt_ids", "completion_ids", "logprobs"}
             missing_keys = required_keys - output.keys()

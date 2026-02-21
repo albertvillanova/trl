@@ -232,6 +232,40 @@ class TestGRPORolloutDispatch:
 
         trainer.vllm_generation.sync_weights.assert_not_called()
 
+    def test_generate_single_turn_rollout_func_receives_structured_messages_for_conversational_prompts(self):
+        # Regression test for issue #5120: rollout_func must receive structured messages (list[dict]), not
+        # chat-template-formatted strings.  Flattening to strings destroys multimodal content (images, typed
+        # content blocks) before rollout logic can access it.
+        trainer = self._make_trainer()
+        trainer.processing_class = MagicMock()
+        trainer.chat_template_kwargs = {}
+        trainer.rollout_func = MagicMock(
+            return_value={"prompt_ids": [[1]], "completion_ids": [[2]], "logprobs": [[0.0]]}
+        )
+        conversational_prompt = [{"role": "user", "content": "hello"}]
+
+        with patch("trl.trainer.grpo_trainer.apply_chat_template") as mock_tpl:
+            trainer._generate_single_turn([conversational_prompt])
+
+        # apply_chat_template must NOT be called before rollout_func — templating is rollout_func's responsibility
+        mock_tpl.assert_not_called()
+        # rollout_func receives the raw structured messages, not a formatted string
+        trainer.rollout_func.assert_called_once_with([conversational_prompt], trainer)
+
+    def test_generate_single_turn_rollout_func_passes_non_conversational_prompt_unchanged(self):
+        trainer = self._make_trainer()
+        trainer.processing_class = MagicMock()
+        trainer.chat_template_kwargs = {}
+        trainer.rollout_func = MagicMock(
+            return_value={"prompt_ids": [[1]], "completion_ids": [[2]], "logprobs": [[0.0]]}
+        )
+
+        with patch("trl.trainer.grpo_trainer.apply_chat_template") as mock_tpl:
+            trainer._generate_single_turn(["plain string prompt"])
+
+        mock_tpl.assert_not_called()
+        trainer.rollout_func.assert_called_once_with(["plain string prompt"], trainer)
+
 
 class TestGRPOTrainer(TrlTestCase):
     def test_init_minimal(self):
