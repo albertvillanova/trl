@@ -266,6 +266,49 @@ class TestGRPORolloutDispatch:
         mock_tpl.assert_not_called()
         trainer.rollout_func.assert_called_once_with(["plain string prompt"], trainer)
 
+    @require_vision
+    def test_generate_single_turn_rollout_func_receives_real_multimodal_messages(self):
+        """Test for issue #5120: rollout_func must receive structured multimodal messages
+        with image objects preserved, not flattened strings that destroy image content.
+        """
+        from PIL import Image as PILImage
+
+        trainer = self._make_trainer()
+        trainer.processing_class = MagicMock()
+        trainer.chat_template_kwargs = {}
+        trainer.use_vllm = False
+        trainer.use_transformers_paged = False
+        trainer._last_loaded_step = trainer.state.global_step
+
+        received_prompts = []
+
+        def capture_rollout_func(prompts, trainer):
+            received_prompts.append(prompts)
+            return {"prompt_ids": [[1]], "completion_ids": [[2]], "logprobs": [[0.0]]}
+
+        trainer.rollout_func = capture_rollout_func
+
+        test_image = PILImage.new("RGB", (10, 10))
+        multimodal_prompt = [
+            {"role": "user", "content": [{"type": "image", "image": test_image}, {"type": "text", "text": "What is in this image?"}]}
+        ]
+
+        with patch("trl.trainer.grpo_trainer.apply_chat_template") as mock_tpl:
+            trainer._generate_single_turn([multimodal_prompt])
+
+        mock_tpl.assert_not_called()
+        assert len(received_prompts) == 1
+        prompt_received = received_prompts[0][0]
+
+        assert isinstance(prompt_received, list), "Prompt should be a list (conversation)"
+        assert isinstance(prompt_received[0]["content"], list), "Content should be a list (multimodal)"
+        assert isinstance(prompt_received[0]["content"][0], dict), "Content blocks should be dicts"
+        assert prompt_received[0]["content"][0]["type"] == "image", "First content block should be image type"
+        assert "image" in prompt_received[0]["content"][0], "Image key should be present"
+        assert isinstance(prompt_received[0]["content"][0]["image"], PILImage.Image), (
+            "Image should be preserved as PIL Image object, not flattened to string"
+        )
+
 
 class TestGRPOTrainer(TrlTestCase):
     def test_init_minimal(self):
