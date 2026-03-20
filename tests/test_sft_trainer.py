@@ -1132,7 +1132,7 @@ class TestSFTTrainer(TrlTestCase):
             "{%- for message in messages -%}"
             "{{- '<|' + message['role'] + '|>' + message['content'] -}}"
             "{%- endfor -%}"
-            "{%- if add_generation_prompt -%}{{- '<|assistant|>GEN' -}}{%- endif -%}"
+            "{%- if add_generation_prompt -%}{{- '<|assistant|>GEN\\n\\n' -}}{%- endif -%}"
         )
 
         trainer = SFTTrainer(
@@ -1143,11 +1143,11 @@ class TestSFTTrainer(TrlTestCase):
         )
 
         formatted = apply_chat_template(dataset[0], tokenizer)
-        prompt_ids = tokenizer(formatted["prompt"], add_special_tokens=False)["input_ids"]
-        completion_ids = tokenizer(formatted["completion"], add_special_tokens=False)["input_ids"]
+        full_ids = tokenizer(formatted["prompt"] + formatted["completion"], add_special_tokens=False)["input_ids"]
+        prompt_ids = tokenizer(formatted["prompt"].rstrip(), add_special_tokens=False)["input_ids"]
 
-        assert trainer.train_dataset[0]["input_ids"] == prompt_ids + completion_ids
-        assert trainer.train_dataset[0]["completion_mask"] == [0] * len(prompt_ids) + [1] * len(completion_ids)
+        assert trainer.train_dataset[0]["input_ids"] == full_ids
+        assert trainer.train_dataset[0]["completion_mask"] == [0] * len(prompt_ids) + [1] * (len(full_ids) - len(prompt_ids))
 
     def test_text_field_tokenization_disables_additional_special_tokens(self):
         model_id = "trl-internal-testing/tiny-LlamaForCausalLM-3.2"
