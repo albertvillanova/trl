@@ -21,7 +21,7 @@ import pytest
 import torch
 import transformers
 from accelerate.utils.memory import release_memory
-from datasets import load_dataset
+from datasets import Dataset, load_dataset
 from packaging.version import Version
 from packaging.version import parse as parse_version
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, TrainingArguments
@@ -29,6 +29,7 @@ from transformers.testing_utils import backend_empty_cache, torch_device
 from transformers.utils import is_peft_available
 
 from trl import SFTConfig, SFTTrainer
+from trl.data_utils import apply_chat_template
 from trl.trainer.sft_trainer import DataCollatorForLanguageModeling, dft_loss
 
 from .testing_utils import (
@@ -1114,6 +1115,89 @@ class TestSFTTrainer(TrlTestCase):
         for n, param in previous_trainable_params.items():
             new_param = trainer.model.get_parameter(n)
             assert not torch.allclose(param, new_param), f"Parameter {n} has not changed"
+
+    def test_prompt_completion_mask_uses_rendered_prompt_boundary(self):
+        dataset = Dataset.from_list(
+            [
+                {
+                    "prompt": [{"role": "user", "content": "What color is the sky?"}],
+                    "completion": [{"role": "assistant", "content": "Blue."}],
+                }
+            ]
+        )
+        training_args = SFTConfig(output_dir=self.tmp_dir, completion_only_loss=True, report_to="none")
+
+        tokenizer = AutoTokenizer.from_pretrained("trl-internal-testing/tiny-Qwen2ForCausalLM-2.5")
+        tokenizer.chat_template = (
+            "{%- for message in messages -%}"
+            "{{- '<|' + message['role'] + '|>' + message['content'] -}}"
+            "{%- endfor -%}"
+            "{%- if add_generation_prompt -%}{{- '<|assistant|>GEN' -}}{%- endif -%}"
+        )
+
+        trainer = SFTTrainer(
+            model="trl-internal-testing/tiny-Qwen2ForCausalLM-2.5",
+            args=training_args,
+            train_dataset=dataset,
+            processing_class=tokenizer,
+        )
+
+        formatted = apply_chat_template(dataset[0], tokenizer)
+        prompt_ids = tokenizer(formatted["prompt"], add_special_tokens=False)["input_ids"]
+        completion_ids = tokenizer(formatted["completion"], add_special_tokens=False)["input_ids"]
+
+        assert trainer.train_dataset[0]["input_ids"] == prompt_ids + completion_ids
+        assert trainer.train_dataset[0]["completion_mask"] == [0] * len(prompt_ids) + [1] * len(completion_ids)
+
+    def test_text_field_tokenization_disables_additional_special_tokens(self):
+        model_id = "trl-internal-testing/tiny-LlamaForCausalLM-3.2"
+        tokenizer = AutoTokenizer.from_pretrained(model_id)
+        text = tokenizer.apply_chat_template(
+            [{"role": "user", "content": "What color is the sky?"}],
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+        dataset = Dataset.from_list([{"text": text}])
+        training_args = SFTConfig(output_dir=self.tmp_dir, report_to="none")
+
+        trainer = SFTTrainer(
+            model=model_id,
+            args=training_args,
+            train_dataset=dataset,
+            processing_class=tokenizer,
+        )
+
+        expected_text = text + tokenizer.eos_token
+        expected_input_ids = tokenizer(expected_text, add_special_tokens=False)["input_ids"]
+        duplicated_input_ids = tokenizer(expected_text)["input_ids"]
+
+        assert trainer.train_dataset[0]["input_ids"] == expected_input_ids
+        assert trainer.train_dataset[0]["input_ids"] != duplicated_input_ids
+
+    def test_prompt_completion_prep_preserves_assistant_masks(self):
+        dataset = Dataset.from_list(
+            [
+                {
+                    "prompt": [{"role": "user", "content": "Question?"}],
+                    "completion": [{"role": "assistant", "content": "Answer."}],
+                }
+            ]
+        )
+        training_args = SFTConfig(
+            output_dir=self.tmp_dir,
+            assistant_only_loss=True,
+            completion_only_loss=True,
+            report_to="none",
+        )
+        trainer = SFTTrainer(
+            model="trl-internal-testing/tiny-Qwen3ForCausalLM",
+            args=training_args,
+            train_dataset=dataset,
+        )
+
+        assert "assistant_masks" in trainer.train_dataset.column_names
+        assert 1 in trainer.train_dataset[0]["assistant_masks"]
+        assert len(trainer.train_dataset[0]["assistant_masks"]) == len(trainer.train_dataset[0]["input_ids"])
 
     def test_train_assistant_only(self):
         # Get the dataset
