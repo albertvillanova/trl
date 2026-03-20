@@ -1050,6 +1050,10 @@ class SFTTrainer(_BaseTrainer):
                     map_kwargs["desc"] = f"Tokenizing {dataset_name} dataset"
 
                 def tokenize_fn(example, processing_class, dataset_text_field, assistant_only_loss):
+                    def get_single_input_ids(processed):
+                        input_ids = processed["input_ids"]
+                        return input_ids[0] if isinstance(input_ids[0], list) else input_ids
+
                     tools = example.get("tools")
                     tools = json.loads(tools) if isinstance(tools, str) else tools
                     if "prompt" in example:  # prompt-completion case
@@ -1061,54 +1065,60 @@ class SFTTrainer(_BaseTrainer):
                             else:
                                 prompt = example["prompt"]
                                 completion = example["completion"]
-                            prompt_ids = processing_class.apply_chat_template(
-                                prompt,
+                            formatted = apply_chat_template(
+                                {
+                                    "prompt": prompt,
+                                    "completion": completion,
+                                    "chat_template_kwargs": example.get("chat_template_kwargs", {}),
+                                },
+                                processing_class,
                                 tools=tools,
-                                add_generation_prompt=True,
-                                tokenize=True,
-                                return_dict=False,
-                                **example.get("chat_template_kwargs", {}),
                             )
-                            # Fix transformers inconsistency: for VLMs, apply_chat_template returns lists of lists
-                            # even for single examples, while for LLMs it returns lists of ints.
-                            prompt_ids = prompt_ids[0] if isinstance(prompt_ids[0], list) else prompt_ids
-                            prompt_completion_processed = processing_class.apply_chat_template(
-                                prompt + completion,
-                                tools=tools,
-                                tokenize=True,
-                                return_dict=True,
-                                return_assistant_tokens_mask=assistant_only_loss,
-                                **example.get("chat_template_kwargs", {}),
+                            prompt_ids = get_single_input_ids(
+                                processing_class(text=formatted["prompt"], add_special_tokens=False)
                             )
-                            # Fix transformers inconsistency: for VLMs, apply_chat_template returns lists of lists
-                            # even for single examples, while for LLMs it returns lists of ints.
-                            prompt_completion_processed = {
-                                k: v[0] if isinstance(v[0], list) else v
-                                for k, v in prompt_completion_processed.items()
-                            }
-                            prompt_completion_ids = prompt_completion_processed["input_ids"]
-                            if "assistant_masks" in prompt_completion_processed:
-                                output["assistant_masks"] = prompt_completion_processed["assistant_masks"]
+                            prompt_completion_ids = get_single_input_ids(
+                                processing_class(
+                                    text=formatted["prompt"] + formatted["completion"], add_special_tokens=False
+                                )
+                            )
+                            if assistant_only_loss:
+                                prompt_completion_processed = processing_class.apply_chat_template(
+                                    prompt + completion,
+                                    tools=tools,
+                                    tokenize=True,
+                                    return_dict=True,
+                                    return_assistant_tokens_mask=assistant_only_loss,
+                                    **example.get("chat_template_kwargs", {}),
+                                )
+                                # Fix transformers inconsistency: for VLMs, apply_chat_template returns lists of lists
+                                # even for single examples, while for LLMs it returns lists of ints.
+                                prompt_completion_processed = {
+                                    k: v[0] if isinstance(v[0], list) else v
+                                    for k, v in prompt_completion_processed.items()
+                                }
+                                if prompt_completion_processed["input_ids"] != prompt_completion_ids:
+                                    raise RuntimeError(
+                                        "Mismatch between rendered prompt-completion tokenization and "
+                                        "`apply_chat_template` tokenization. This prevents TRL from building "
+                                        "consistent completion and assistant masks."
+                                    )
+                                if "assistant_masks" in prompt_completion_processed:
+                                    output["assistant_masks"] = prompt_completion_processed["assistant_masks"]
                         else:
-                            prompt_ids = processing_class(text=example["prompt"])["input_ids"]
-                            prompt_completion_ids = processing_class(text=example["prompt"] + example["completion"])[
-                                "input_ids"
-                            ]
-                            # Fix transformers inconsistency: for VLMs, processing_class returns lists of lists
-                            # even for single examples, while for LLMs it returns lists of ints.
-                            prompt_ids = prompt_ids[0] if isinstance(prompt_ids[0], list) else prompt_ids
-                            prompt_completion_ids = (
-                                prompt_completion_ids[0]
-                                if isinstance(prompt_completion_ids[0], list)
-                                else prompt_completion_ids
+                            prompt_ids = get_single_input_ids(
+                                processing_class(text=example["prompt"], add_special_tokens=False)
+                            )
+                            prompt_completion_ids = get_single_input_ids(
+                                processing_class(
+                                    text=example["prompt"] + example["completion"], add_special_tokens=False
+                                )
                             )
 
-                        # Check if the tokenized prompt starts with the tokenized prompt+completion
                         if not prompt_completion_ids[: len(prompt_ids)] == prompt_ids:
-                            logger.warning(
+                            raise RuntimeError(
                                 "Mismatch between tokenized prompt and the start of tokenized prompt+completion. "
-                                "This may be due to unexpected tokenizer behavior, whitespace issues, or special "
-                                "token handling. Verify that the tokenizer is processing text consistently."
+                                "TRL cannot build a correct completion mask for this example."
                             )
 
                         # Create completion mask
@@ -1135,7 +1145,11 @@ class SFTTrainer(_BaseTrainer):
                             processed = {k: v[0] if isinstance(v[0], list) else v for k, v in processed.items()}
                             output = {k: processed[k] for k in ("input_ids", "assistant_masks") if k in processed}
                         else:
-                            output = {"input_ids": processing_class(text=example[dataset_text_field])["input_ids"]}
+                            output = {
+                                "input_ids": get_single_input_ids(
+                                    processing_class(text=example[dataset_text_field], add_special_tokens=False)
+                                )
+                            }
 
                     if "assistant_masks" in output and 1 not in output["assistant_masks"]:
                         raise RuntimeError(
