@@ -1074,8 +1074,9 @@ class SFTTrainer(_BaseTrainer):
                                 processing_class,
                                 tools=tools,
                             )
+                            prompt_text = formatted["prompt"].rstrip()
                             prompt_ids = get_single_input_ids(
-                                processing_class(text=formatted["prompt"], add_special_tokens=False)
+                                processing_class(text=prompt_text, add_special_tokens=False)
                             )
                             prompt_completion_ids = get_single_input_ids(
                                 processing_class(
